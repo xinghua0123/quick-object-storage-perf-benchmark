@@ -171,7 +171,7 @@ if [ "$CLUSTER_TYPE" = "eks" ]; then
     # Check if any nodes have the bench_test taint (check taint, not label)
     # Look for nodes with taint key=node_group and value=bench_test
     if kubectl get nodes -o jsonpath='{range .items[*]}{range .spec.taints[*]}{.key}{"="}{.value}{"\n"}{end}{end}' 2>/dev/null | grep -q "node_group=bench_test"; then
-        TOLERATIONS_YAML="  tolerations:
+        TOLERATIONS_YAML="tolerations:
   - key: \"node_group\"
     operator: \"Equal\"
     value: \"bench_test\"
