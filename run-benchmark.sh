@@ -126,12 +126,13 @@ echo "📦 Generating pod manifest..."
 # Generate tolerations based on cluster type
 NEEDS_TOLERATIONS=false
 if [ "$CLUSTER_TYPE" = "eks" ]; then
-    # Check if bench_test node group exists
-    if kubectl get nodes -l node_group=bench_test &> /dev/null 2>&1; then
+    # Check if any nodes have the bench_test taint (check taint, not label)
+    # Look for nodes with taint key=node_group and value=bench_test
+    if kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[*].key}{"="}{.spec.taints[*].value}{"\n"}{end}' 2>/dev/null | grep -q "node_group=bench_test"; then
         NEEDS_TOLERATIONS=true
         echo "ℹ️  EKS detected: Adding tolerations for bench_test node group"
     else
-        echo "ℹ️  EKS detected but bench_test node group not found, skipping tolerations"
+        echo "ℹ️  EKS detected but bench_test node group taint not found, skipping tolerations"
     fi
 else
     echo "ℹ️  Minikube or other cluster: Tolerations not needed"
