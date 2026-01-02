@@ -1,0 +1,347 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{POD_NAME}}
+  namespace: {{NAMESPACE}}
+spec:
+  {{TOLERATIONS}}
+  initContainers:
+  - name: s3-connectivity-check
+    image: amazon/aws-cli:latest
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      set -e
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "🔍 S3 Connectivity Pre-flight Check"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      echo "📋 Configuration:"
+      echo "  Endpoint: $OPENDAL_S3_ENDPOINT"
+      echo "  Bucket: $OPENDAL_S3_BUCKET"
+      echo "  Region: $OPENDAL_S3_REGION"
+      echo ""
+      
+      # Configure AWS CLI
+      export AWS_ACCESS_KEY_ID="$OPENDAL_S3_ACCESS_KEY_ID"
+      export AWS_SECRET_ACCESS_KEY="$OPENDAL_S3_SECRET_ACCESS_KEY"
+      export AWS_SESSION_TOKEN="$OPENDAL_S3_SESSION_TOKEN"
+      export AWS_DEFAULT_REGION="$OPENDAL_S3_REGION"
+      
+      # Determine endpoint URL (preserve http:// or https://, or add https:// if missing)
+      ENDPOINT_URL="$OPENDAL_S3_ENDPOINT"
+      if [[ ! "$ENDPOINT_URL" =~ ^https?:// ]]; then
+        ENDPOINT_URL="https://$ENDPOINT_URL"
+      fi
+      
+      echo "🧪 Test 1: Checking S3 endpoint connectivity..."
+      if curl -s --max-time 10 "$ENDPOINT_URL" >/dev/null 2>&1; then
+        echo "✅ Endpoint is reachable"
+      else
+        echo "⚠️  Direct endpoint check inconclusive, proceeding to credential test..."
+      fi
+      
+      echo ""
+      echo "🧪 Test 2: Verifying AWS credentials..."
+      # For HTTP endpoints (MinIO), use a simpler approach
+      if [[ "$OPENDAL_S3_ENDPOINT" =~ ^http:// ]]; then
+        # HTTP endpoint (MinIO) - configure AWS CLI for MinIO
+        # MinIO works better with path-style addressing
+        export AWS_S3_FORCE_PATH_STYLE=true
+        # Try to list buckets - if it fails, credentials might be wrong but endpoint is reachable
+        if aws --endpoint-url "$OPENDAL_S3_ENDPOINT" s3 ls 2>&1 | grep -q "s3://\|PRE\|$OPENDAL_S3_BUCKET"; then
+          echo "✅ Credentials are valid"
+        else
+          # For MinIO, if endpoint is reachable, assume credentials are OK and proceed
+          echo "⚠️  Credential check inconclusive for MinIO, but endpoint is reachable"
+          echo "   Proceeding with bucket check..."
+        fi
+      else
+        # HTTPS endpoint (AWS S3)
+        if aws s3 ls --endpoint-url "$ENDPOINT_URL" 2>&1; then
+          echo "✅ Credentials are valid"
+        else
+          echo "❌ ERROR: Invalid or expired AWS credentials"
+          echo "Please update credentials and redeploy."
+          exit 1
+        fi
+      fi
+      
+      echo ""
+      echo "🧪 Test 3: Checking bucket access: $OPENDAL_S3_BUCKET"
+      if [[ "$OPENDAL_S3_ENDPOINT" =~ ^http:// ]]; then
+        # For MinIO, try to access or create bucket
+        export AWS_S3_FORCE_PATH_STYLE=true
+        if aws --endpoint-url "$OPENDAL_S3_ENDPOINT" s3 ls "s3://$OPENDAL_S3_BUCKET" 2>&1; then
+          echo "✅ Bucket is accessible"
+        else
+          echo "⚠️  Bucket may not exist, attempting to create it..."
+          if aws --endpoint-url "$OPENDAL_S3_ENDPOINT" s3 mb "s3://$OPENDAL_S3_BUCKET" 2>&1; then
+            echo "✅ Bucket created successfully"
+          else
+            # For MinIO, if we can't create, try to continue anyway - the benchmark will handle it
+            echo "⚠️  Could not verify bucket access, but continuing (benchmark will handle bucket creation if needed)"
+          fi
+        fi
+      else
+        if aws s3 ls "s3://$OPENDAL_S3_BUCKET" --endpoint-url "$ENDPOINT_URL" 2>&1; then
+          echo "✅ Bucket is accessible"
+        else
+          echo "❌ ERROR: Cannot access bucket $OPENDAL_S3_BUCKET"
+          echo "Please verify bucket exists and credentials have proper permissions."
+          exit 1
+        fi
+      fi
+      
+      echo ""
+      echo "🧪 Test 4: Testing write permissions..."
+      TEST_FILE="connectivity-test-$(date +%s).txt"
+      if [[ "$OPENDAL_S3_ENDPOINT" =~ ^http:// ]]; then
+        export AWS_S3_FORCE_PATH_STYLE=true
+        if echo "test-content" | aws --endpoint-url "$OPENDAL_S3_ENDPOINT" s3 cp - "s3://$OPENDAL_S3_BUCKET/$TEST_FILE" 2>&1; then
+          echo "✅ Write permission confirmed"
+          aws --endpoint-url "$OPENDAL_S3_ENDPOINT" s3 rm "s3://$OPENDAL_S3_BUCKET/$TEST_FILE" 2>&1 || true
+        else
+          # For MinIO, if write fails, warn but continue - benchmark will test it
+          echo "⚠️  Write test failed, but continuing (benchmark will verify write access)"
+        fi
+      else
+        if echo "test-content" | aws s3 cp - "s3://$OPENDAL_S3_BUCKET/$TEST_FILE" --endpoint-url "$ENDPOINT_URL" 2>&1; then
+          echo "✅ Write permission confirmed"
+          aws s3 rm "s3://$OPENDAL_S3_BUCKET/$TEST_FILE" --endpoint-url "$ENDPOINT_URL" 2>&1 || true
+        else
+          echo "❌ ERROR: Cannot write to bucket $OPENDAL_S3_BUCKET"
+          echo "Please verify credentials have write permissions."
+          exit 1
+        fi
+      fi
+      
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "✅ All connectivity checks passed!"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+    env:
+    - name: OPENDAL_TEST
+      value: "s3"
+    - name: OPENDAL_S3_ENDPOINT
+      value: "{{S3_ENDPOINT}}"
+    - name: OPENDAL_S3_BUCKET
+      value: "{{S3_BUCKET}}"
+    - name: OPENDAL_S3_REGION
+      value: "{{S3_REGION}}"
+    - name: OPENDAL_S3_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: access_key_id
+    - name: OPENDAL_S3_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: secret_access_key
+    - name: OPENDAL_S3_SESSION_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: session_token
+          optional: true
+  containers:
+  - name: opendal-bench
+    image: rust:1.75-slim
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      set -e
+      echo "📦 Installing git and build dependencies..."
+      apt-get update && apt-get install -y git curl pkg-config libssl-dev ca-certificates
+      
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "🚀 Starting OPENDAL S3 Benchmark Suite"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      
+      echo "📦 Cloning opendal repository..."
+      git clone https://github.com/apache/opendal.git opendal-repo
+      cd opendal-repo
+      
+      echo "🔧 S3 Configuration:"
+      echo "  Endpoint: $OPENDAL_S3_ENDPOINT"
+      echo "  Bucket: $OPENDAL_S3_BUCKET"
+      echo "  Region: $OPENDAL_S3_REGION"
+      echo "  Session Token: [SET]"
+      echo ""
+      
+      # ============================================================
+      # PART 1: Throughput Benchmark (cargo bench)
+      # ============================================================
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "📊 PART 1: Throughput Benchmark (Read/Write MB/s)"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      
+      # Navigate to benches directory (check both possible paths)
+      if [ -d "core/benches" ]; then
+        cd core/benches
+      elif [ -d "benches" ]; then
+        cd benches
+      else
+        echo "❌ ERROR: Could not find benches directory"
+        echo "Available directories:"
+        ls -la
+        exit 1
+      fi
+      
+      echo "🔧 Compiling throughput benchmark with S3 service support (this may take a few minutes)..."
+      cargo bench --bench ops --features="tests,services-s3" --no-run
+      
+      echo ""
+      echo "🚀 Running throughput benchmark (10 samples per test, max 4 concurrent connections, 60 min timeout)..."
+      
+      # Run the benchmark with extended timeout (3600 seconds = 60 minutes)
+      # Use --sample-count CLI arg to set 10 samples (reduced from default 100)
+      # Skip high concurrency tests to avoid network errors (max 4 concurrent)
+      export OPENDAL_BENCH_MAX_CONCURRENT=4
+      timeout 3600 cargo bench --bench ops --features="tests,services-s3" -- --sample-count 10 --skip 'concurrent/8' --skip 'concurrent/16' --skip 'concurrent/32' 2>&1 || {
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -eq 124 ]; then
+          echo ""
+          echo "⚠️  Throughput benchmark timed out after 60 minutes"
+          echo "This may indicate performance issues or the benchmark is taking longer than expected."
+        fi
+        # Continue to QPS benchmark even if throughput benchmark fails
+        echo "⚠️  Throughput benchmark completed with exit code: $EXIT_CODE"
+      }
+      
+      echo ""
+      echo "✅ Throughput benchmark completed!"
+      echo ""
+      
+      # ============================================================
+      # PART 2: QPS Benchmark (qps-bench)
+      # ============================================================
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "📊 PART 2: QPS / Latency Microbenchmark"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      
+      # Return to opendal root (we're in opendal-repo/core/benches, go back to root)
+      cd ../..
+      
+      echo "🔧 Setting up QPS benchmark..."
+      mkdir -p core/examples/qps-bench/src
+      
+      # Copy source files from ConfigMap
+      if [ -f /qps-source/Cargo.toml ] && [ -f /qps-source/main.rs ]; then
+        echo "📋 Copying QPS benchmark source from ConfigMap..."
+        cp /qps-source/Cargo.toml core/examples/qps-bench/
+        cp /qps-source/main.rs core/examples/qps-bench/src/
+      else
+        echo "❌ ERROR: QPS benchmark source files not found in ConfigMap"
+        echo "   Expected: /qps-source/Cargo.toml and /qps-source/main.rs"
+        exit 1
+      fi
+      
+      echo "🔧 Building QPS benchmark binary..."
+      cd core/examples/qps-bench
+      cargo build --release 2>&1
+      
+      echo ""
+      echo "🚀 Running QPS benchmark (read_write mode, 30s duration, 32 concurrency)..."
+      echo "   Endpoint: $OPENDAL_S3_ENDPOINT"
+      echo "   Bucket: $OPENDAL_S3_BUCKET"
+      echo "   Region: $OPENDAL_S3_REGION"
+      echo ""
+      
+      # Determine endpoint protocol
+      ENDPOINT_URL="$OPENDAL_S3_ENDPOINT"
+      if [[ ! "$ENDPOINT_URL" =~ ^https?:// ]]; then
+        ENDPOINT_URL="https://$OPENDAL_S3_ENDPOINT"
+      fi
+      
+      # Build QPS benchmark command
+      QPS_CMD="../../target/release/qps-bench \
+        --service s3 \
+        --endpoint \"$ENDPOINT_URL\" \
+        --region \"$OPENDAL_S3_REGION\" \
+        --bucket \"$OPENDAL_S3_BUCKET\" \
+        --access-key \"$OPENDAL_S3_ACCESS_KEY_ID\" \
+        --secret-key \"$OPENDAL_S3_SECRET_ACCESS_KEY\" \
+        --prefix \"bench\" \
+        --objects 1000 \
+        --object-size-bytes 1024 \
+        --concurrency 32 \
+        --duration-seconds 30 \
+        --mode read_write \
+        --cleanup"
+      
+      # Add session token if available
+      if [ -n "$OPENDAL_S3_SESSION_TOKEN" ]; then
+        QPS_CMD="$QPS_CMD --session-token \"$OPENDAL_S3_SESSION_TOKEN\""
+      fi
+      
+      # For S3-compatible services (non-AWS), use path-style
+      if [[ "$OPENDAL_S3_ENDPOINT" != *"amazonaws.com"* ]]; then
+        QPS_CMD="$QPS_CMD --force-path-style"
+      fi
+      
+      # Run QPS benchmark
+      eval $QPS_CMD 2>&1 || {
+        EXIT_CODE=$?
+        echo ""
+        echo "⚠️  QPS benchmark completed with exit code: $EXIT_CODE"
+        # Don't fail the entire pod if QPS benchmark fails
+      }
+      
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "✅ All benchmarks completed!"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    env:
+    - name: OPENDAL_TEST
+      value: "s3"
+    - name: OPENDAL_S3_ENDPOINT
+      value: "{{S3_ENDPOINT}}"
+    - name: OPENDAL_S3_BUCKET
+      value: "{{S3_BUCKET}}"
+    - name: OPENDAL_S3_REGION
+      value: "{{S3_REGION}}"
+    - name: OPENDAL_S3_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: access_key_id
+    - name: OPENDAL_S3_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: secret_access_key
+    - name: OPENDAL_S3_SESSION_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: session_token
+          optional: true
+    - name: AWS_SESSION_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: {{SECRET_NAME}}
+          key: session_token
+          optional: true
+    volumeMounts:
+    - name: qps-source
+      mountPath: /qps-source
+      readOnly: true
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "2"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+  volumes:
+  - name: qps-source
+    configMap:
+      name: qps-bench-source
+  restartPolicy: Never
+

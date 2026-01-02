@@ -83,6 +83,7 @@ The script will:
 - ✅ Prompt for S3 configuration (endpoint, bucket, region)
 - ✅ Run pre-flight connectivity checks
 - ✅ Deploy benchmark pod and run tests
+- ✅ Run both throughput (MB/s) and QPS (ops/sec) benchmarks
 - ✅ Save results to timestamped log file
 - ✅ Auto-cleanup resources
 
@@ -122,8 +123,9 @@ The script will:
 
 4. **Benchmark Execution**
    - Clones OPENDAL repository
-   - Compiles benchmark suite (~3-5 minutes)
-   - Runs complete test suite (~10-15 minutes)
+   - Compiles throughput benchmark suite (~3-5 minutes)
+   - Runs throughput tests (read/write MB/s) (~10-15 minutes)
+   - Builds and runs QPS benchmark (ops/sec and latency) (~5-10 minutes)
    - Captures all results
 
 5. **Results & Cleanup**
@@ -142,10 +144,17 @@ The script will:
 
 ### Test Matrix
 
+**Throughput Tests (MB/s):**
 | Operation | File Sizes | Concurrency |
 |-----------|------------|-------------|
 | **Read** | 4KB, 64KB, 1MB, 16MB | Sequential, 1, 2, 4 threads |
 | **Write** | 4KB, 64KB, 1MB, 16MB | Sequential, 1, 2, 4 threads |
+
+**QPS Tests (ops/sec and latency):**
+| Operation | Object Size | Concurrency | Duration |
+|-----------|-------------|-------------|----------|
+| **Read** | 1KB | 32 | 30s |
+| **Write** | 1KB | 32 | 30s |
 
 ## 📁 Results
 
@@ -171,6 +180,7 @@ ls -lt benchmark-results-*.log | head -1 | awk '{print $NF}' | xargs tail -100
 
 ### Results Format
 
+**Throughput Results:**
 ```
 ops                  fastest       │ slowest       │ median        │ mean          │ samples │ iters
 ├─ read                            │               │               │               │         │
@@ -179,10 +189,25 @@ ops                  fastest       │ slowest       │ median        │ mean 
 │  │  │              52.08 MB/s    │ 13.66 MB/s    │ 35.9 MB/s     │ 34.81 MB/s    │         │
 ```
 
+**QPS Results:**
+```json
+{
+  "mode": "read_small",
+  "concurrency": 32,
+  "duration_seconds": 30,
+  "ok_ops": 24583,
+  "err_ops": 0,
+  "qps": 819.43,
+  "latency_us_p50": 40255,
+  "latency_us_p95": 100799,
+  "latency_us_p99": 158847
+}
+```
+
 **Key Metrics:**
-- **Median**: Most reliable performance indicator (50th percentile)
-- **Mean**: Average performance
-- **Throughput**: MB/s or GB/s for each test
+- **Throughput**: MB/s or GB/s for each test (median is most reliable)
+- **QPS**: Operations per second
+- **Latency**: P50 (median), P95, P99 percentiles in microseconds
 
 ## 🔍 Monitoring
 
@@ -373,6 +398,20 @@ NAMESPACE="your-namespace"
 - ✅ No credentials in pod manifests or log files
 - ✅ Pre-flight checks validate credentials before deployment
 - ⚠️  Log files contain performance data - review before sharing
+
+## 📁 Repository Structure
+
+```
+quick-object-storage-perf-benchmark/
+├── run-benchmark.sh              # Main benchmark script
+├── benchmark-pod.yaml.template    # Kubernetes pod template
+├── qps-bench/                    # QPS benchmark source code
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs
+├── README.md                     # This file
+└── benchmark-results-*.log        # Generated result files
+```
 
 ## 📚 Additional Resources
 

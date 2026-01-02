@@ -102,6 +102,7 @@ echo ""
 echo "🧹 Cleaning up existing resources..."
 kubectl delete pod $POD_NAME --namespace=$NAMESPACE --ignore-not-found=true
 kubectl delete secret $SECRET_NAME --namespace=$NAMESPACE --ignore-not-found=true
+kubectl delete configmap qps-bench-source --namespace=$NAMESPACE --ignore-not-found=true
 
 echo ""
 echo "🔐 Creating Kubernetes secret for AWS credentials..."
@@ -121,15 +122,60 @@ fi
 echo "✅ Secret created: $SECRET_NAME"
 
 echo ""
+echo "📦 Creating QPS benchmark source ConfigMap..."
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QPS_SOURCE_DIR="$SCRIPT_DIR/qps-bench"
+
+# Check if QPS source files exist
+if [ ! -f "$QPS_SOURCE_DIR/Cargo.toml" ] || [ ! -f "$QPS_SOURCE_DIR/src/main.rs" ]; then
+    echo "❌ ERROR: QPS benchmark source files not found"
+    echo "   Expected: $QPS_SOURCE_DIR/Cargo.toml"
+    echo "   Expected: $QPS_SOURCE_DIR/src/main.rs"
+    echo ""
+    echo "Please ensure the QPS benchmark source files are in the qps-bench/ directory"
+    exit 1
+fi
+
+echo "✅ Found QPS benchmark source files in: $QPS_SOURCE_DIR"
+
+kubectl create configmap qps-bench-source \
+    --namespace=$NAMESPACE \
+    --from-file=Cargo.toml="$QPS_SOURCE_DIR/Cargo.toml" \
+    --from-file=main.rs="$QPS_SOURCE_DIR/src/main.rs" 2>/dev/null || \
+kubectl create configmap qps-bench-source \
+    --namespace=$NAMESPACE \
+    --from-file=Cargo.toml="$QPS_SOURCE_DIR/Cargo.toml" \
+    --from-file=main.rs="$QPS_SOURCE_DIR/src/main.rs" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+echo "✅ ConfigMap created: qps-bench-source"
+
+echo ""
 echo "📦 Generating pod manifest..."
 
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML_TEMPLATE="$SCRIPT_DIR/benchmark-pod.yaml.template"
+
+# Check if YAML template exists
+if [ ! -f "$YAML_TEMPLATE" ]; then
+    echo "❌ ERROR: YAML template not found: $YAML_TEMPLATE"
+    exit 1
+fi
+
 # Generate tolerations based on cluster type
-NEEDS_TOLERATIONS=false
+TOLERATIONS_YAML=""
 if [ "$CLUSTER_TYPE" = "eks" ]; then
     # Check if any nodes have the bench_test taint (check taint, not label)
     # Look for nodes with taint key=node_group and value=bench_test
     if kubectl get nodes -o jsonpath='{range .items[*]}{range .spec.taints[*]}{.key}{"="}{.value}{"\n"}{end}{end}' 2>/dev/null | grep -q "node_group=bench_test"; then
-        NEEDS_TOLERATIONS=true
+        TOLERATIONS_YAML="  tolerations:
+  - key: \"node_group\"
+    operator: \"Equal\"
+    value: \"bench_test\"
+    effect: \"NoSchedule\""
         echo "ℹ️  EKS detected: Adding tolerations for bench_test node group"
     else
         echo "ℹ️  EKS detected but bench_test node group taint not found, skipping tolerations"
@@ -138,200 +184,23 @@ else
     echo "ℹ️  Minikube or other cluster: Tolerations not needed"
 fi
 
-# Build YAML with conditional tolerations
-cat > /tmp/opendal-bench-dynamic.yaml <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: $POD_NAME
-  namespace: $NAMESPACE
-spec:
-$(if [ "$NEEDS_TOLERATIONS" = "true" ]; then cat <<TOLERATIONS
-  tolerations:
-  - key: "node_group"
-    operator: "Equal"
-    value: "bench_test"
-    effect: "NoSchedule"
-TOLERATIONS
-fi)
-  initContainers:
-  - name: s3-connectivity-check
-    image: amazon/aws-cli:latest
-    command: ["/bin/bash", "-c"]
-    args:
-    - |
-      set -e
-      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      echo "🔍 S3 Connectivity Pre-flight Check"
-      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      echo ""
-      echo "📋 Configuration:"
-      echo "  Endpoint: \$OPENDAL_S3_ENDPOINT"
-      echo "  Bucket: \$OPENDAL_S3_BUCKET"
-      echo "  Region: \$OPENDAL_S3_REGION"
-      echo ""
-      
-      # Configure AWS CLI
-      export AWS_ACCESS_KEY_ID="\$OPENDAL_S3_ACCESS_KEY_ID"
-      export AWS_SECRET_ACCESS_KEY="\$OPENDAL_S3_SECRET_ACCESS_KEY"
-      export AWS_SESSION_TOKEN="\$OPENDAL_S3_SESSION_TOKEN"
-      export AWS_DEFAULT_REGION="\$OPENDAL_S3_REGION"
-      
-      echo "🧪 Test 1: Checking S3 endpoint connectivity..."
-      if curl -s --max-time 10 "https://\$OPENDAL_S3_ENDPOINT" >/dev/null 2>&1; then
-        echo "✅ Endpoint is reachable"
-      else
-        echo "⚠️  Direct endpoint check inconclusive, proceeding to credential test..."
-      fi
-      
-      echo ""
-      echo "🧪 Test 2: Verifying AWS credentials..."
-      if aws s3 ls --endpoint-url "https://\$OPENDAL_S3_ENDPOINT" 2>&1; then
-        echo "✅ Credentials are valid"
-      else
-        echo "❌ ERROR: Invalid or expired AWS credentials"
-        echo "Please update credentials and redeploy."
-        exit 1
-      fi
-      
-      echo ""
-      echo "🧪 Test 3: Checking bucket access: \$OPENDAL_S3_BUCKET"
-      if aws s3 ls "s3://\$OPENDAL_S3_BUCKET" --endpoint-url "https://\$OPENDAL_S3_ENDPOINT" 2>&1; then
-        echo "✅ Bucket is accessible"
-      else
-        echo "❌ ERROR: Cannot access bucket \$OPENDAL_S3_BUCKET"
-        echo "Please verify bucket exists and credentials have proper permissions."
-        exit 1
-      fi
-      
-      echo ""
-      echo "🧪 Test 4: Testing write permissions..."
-      TEST_FILE="connectivity-test-\$(date +%s).txt"
-      if echo "test-content" | aws s3 cp - "s3://\$OPENDAL_S3_BUCKET/\$TEST_FILE" --endpoint-url "https://\$OPENDAL_S3_ENDPOINT" 2>&1; then
-        echo "✅ Write permission confirmed"
-        aws s3 rm "s3://\$OPENDAL_S3_BUCKET/\$TEST_FILE" --endpoint-url "https://\$OPENDAL_S3_ENDPOINT" 2>&1 || true
-      else
-        echo "❌ ERROR: Cannot write to bucket \$OPENDAL_S3_BUCKET"
-        echo "Please verify credentials have write permissions."
-        exit 1
-      fi
-      
-      echo ""
-      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      echo "✅ All connectivity checks passed!"
-      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      echo ""
-    env:
-    - name: OPENDAL_TEST
-      value: "s3"
-    - name: OPENDAL_S3_ENDPOINT
-      value: "$S3_ENDPOINT"
-    - name: OPENDAL_S3_BUCKET
-      value: "$S3_BUCKET"
-    - name: OPENDAL_S3_REGION
-      value: "$S3_REGION"
-    - name: OPENDAL_S3_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: access_key_id
-    - name: OPENDAL_S3_SECRET_ACCESS_KEY
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: secret_access_key
-    - name: OPENDAL_S3_SESSION_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: session_token
-          optional: true
-  containers:
-  - name: opendal-bench
-    image: rust:1.75-slim
-    command: ["/bin/bash", "-c"]
-    args:
-    - |
-      set -e
-      echo "📦 Installing git and build dependencies..."
-      apt-get update && apt-get install -y git curl pkg-config libssl-dev ca-certificates
-      
-      echo "🚀 Starting OPENDAL S3 Benchmark Setup..."
-      echo "📦 Cloning opendal repository..."
-      git clone https://github.com/apache/opendal.git
-      cd opendal/core/benches
-      
-      echo "🔧 S3 Configuration:"
-      echo "  Endpoint: \$OPENDAL_S3_ENDPOINT"
-      echo "  Bucket: \$OPENDAL_S3_BUCKET"
-      echo "  Region: \$OPENDAL_S3_REGION"
-      echo "  Session Token: [SET]"
-      
-      echo ""
-      echo "🔧 Compiling benchmark with S3 service support (this may take a few minutes)..."
-      cargo bench --bench ops --features="tests,services-s3" --no-run
-      
-      echo ""
-      echo "🚀 Running benchmark (10 samples per test, max 4 concurrent connections, 60 min timeout)..."
-      
-      # Run the benchmark with extended timeout (3600 seconds = 60 minutes)
-      # Use --sample-count CLI arg to set 10 samples (reduced from default 100)
-      # Skip high concurrency tests to avoid network errors (max 4 concurrent)
-      export OPENDAL_BENCH_MAX_CONCURRENT=4
-      timeout 3600 cargo bench --bench ops --features="tests,services-s3" -- --sample-count 10 --skip 'concurrent/8' --skip 'concurrent/16' --skip 'concurrent/32' 2>&1 || {
-        EXIT_CODE=\$?
-        if [ \$EXIT_CODE -eq 124 ]; then
-          echo ""
-          echo "⚠️  Benchmark timed out after 60 minutes"
-          echo "This may indicate performance issues or the benchmark is taking longer than expected."
-        fi
-        exit \$EXIT_CODE
-      }
-      
-      echo ""
-      echo "✅ Benchmark completed!"
-    env:
-    - name: OPENDAL_TEST
-      value: "s3"
-    - name: OPENDAL_S3_ENDPOINT
-      value: "$S3_ENDPOINT"
-    - name: OPENDAL_S3_BUCKET
-      value: "$S3_BUCKET"
-    - name: OPENDAL_S3_REGION
-      value: "$S3_REGION"
-    - name: OPENDAL_S3_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: access_key_id
-    - name: OPENDAL_S3_SECRET_ACCESS_KEY
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: secret_access_key
-    - name: OPENDAL_S3_SESSION_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: session_token
-          optional: true
-    - name: AWS_SESSION_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: $SECRET_NAME
-          key: session_token
-          optional: true
-    resources:
-      requests:
-        memory: "4Gi"
-        cpu: "2"
-      limits:
-        memory: "8Gi"
-        cpu: "4"
-  restartPolicy: Never
-EOF
+# Substitute variables in YAML template
+sed -e "s|{{POD_NAME}}|$POD_NAME|g" \
+    -e "s|{{NAMESPACE}}|$NAMESPACE|g" \
+    -e "s|{{SECRET_NAME}}|$SECRET_NAME|g" \
+    -e "s|{{S3_ENDPOINT}}|$S3_ENDPOINT|g" \
+    -e "s|{{S3_BUCKET}}|$S3_BUCKET|g" \
+    -e "s|{{S3_REGION}}|$S3_REGION|g" \
+    -e "s|{{TOLERATIONS}}|$TOLERATIONS_YAML|g" \
+    "$YAML_TEMPLATE" > /tmp/opendal-bench-dynamic.yaml
 
-echo "✅ Manifest generated"
+# Remove empty tolerations line if no tolerations were added
+if [ -z "$TOLERATIONS_YAML" ]; then
+    sed -i '' '/^  {{TOLERATIONS}}$/d' /tmp/opendal-bench-dynamic.yaml 2>/dev/null || \
+    sed -i '/^  {{TOLERATIONS}}$/d' /tmp/opendal-bench-dynamic.yaml
+fi
+
+echo "✅ Manifest generated from template: $YAML_TEMPLATE"
 
 echo ""
 echo "📦 Deploying benchmark pod..."
@@ -447,10 +316,10 @@ echo ""
 echo "Cleaning up resources..."
 kubectl delete pod $POD_NAME --namespace=$NAMESPACE --ignore-not-found=true
 kubectl delete secret $SECRET_NAME --namespace=$NAMESPACE --ignore-not-found=true
+kubectl delete configmap qps-bench-source --namespace=$NAMESPACE --ignore-not-found=true
 
 echo ""
 echo "✅ Done! Full results saved to: $LOG_FILE"
 echo ""
 echo "To view complete results:"
 echo "  cat $LOG_FILE | grep -A 200 'Running OPENDAL'"
-
