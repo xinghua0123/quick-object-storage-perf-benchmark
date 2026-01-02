@@ -52,9 +52,9 @@ A streamlined tool to benchmark S3-compatible object storage (AWS S3, MinIO, etc
    - AWS Session Token (if using temporary credentials)
    - S3 bucket with read/write permissions
 
-### For MinIO Benchmarking
+### For S3-Compatible Storage (MinIO, etc.)
 
-4. **No additional credentials needed** - MinIO is deployed automatically
+4. **S3-compatible credentials** - Use your storage provider's access keys
 
 ## 🚀 Quick Start
 
@@ -342,13 +342,7 @@ NAMESPACE="your-namespace"
 - **Write 16MB**: ~95-100 MB/s
 - **Write 1MB**: ~35-40 MB/s
 
-### MinIO (Local)
-- **Read 16MB**: ~1-1.5 GB/s (10-15x faster)
-- **Read 1MB**: ~800-900 MB/s (20-25x faster)
-- **Write 16MB**: ~200-250 MB/s (2-3x faster)
-- **Write 1MB**: ~150-160 MB/s (4-5x faster)
-
-*Actual results vary based on cluster location, network conditions, and storage backend.*
+*Actual results vary based on cluster location, network conditions, and storage backend. Performance will differ for S3-compatible storage depending on deployment (local vs remote) and infrastructure.*
 
 ## 🔒 Security
 
