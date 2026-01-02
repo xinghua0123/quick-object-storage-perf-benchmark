@@ -334,15 +334,37 @@ Edit script configuration:
 NAMESPACE="your-namespace"
 ```
 
-## 📈 Expected Performance
+## 📈 Actual Performance Results
 
-### AWS S3 (Remote)
-- **Read 16MB**: ~95-100 MB/s
-- **Read 1MB**: ~35-40 MB/s
-- **Write 16MB**: ~95-100 MB/s
-- **Write 1MB**: ~35-40 MB/s
+### AWS S3 Benchmark Results
 
-*Actual results vary based on cluster location, network conditions, and storage backend. Performance will differ for S3-compatible storage depending on deployment (local vs remote) and infrastructure.*
+**Read Operations:**
+```
+├─ read
+│  ├─ whole
+│  │  ├─ 1.00 MiB    25.73 ms      │ 34.7 ms       │ 30.47 ms      │ 30.49 ms      │ 10      │ 10
+│  │  │              40.75 MB/s    │ 30.21 MB/s    │ 34.4 MB/s     │ 34.38 MB/s    │         │
+│  │  ├─ 16.0 MiB    170.3 ms      │ 173 ms        │ 170.8 ms      │ 171.2 ms      │ 10      │ 10
+│  │  │              98.47 MB/s    │ 96.96 MB/s    │ 98.21 MB/s    │ 97.94 MB/s    │         │
+```
+
+**Write Operations:**
+```
+╰─ write
+   ├─ whole
+   │  ├─ 1.00 MiB    58.67 ms      │ 130 ms        │ 90.45 ms      │ 92.4 ms       │ 10      │ 10
+   │  │              17.86 MB/s    │ 8.06 MB/s     │ 11.59 MB/s    │ 11.34 MB/s    │         │
+   │  ├─ 16.0 MiB    219 ms        │ 445.1 ms      │ 237 ms        │ 264.8 ms      │ 10      │ 10
+   │  │              76.58 MB/s    │ 37.69 MB/s    │ 70.76 MB/s    │ 63.34 MB/s    │         │
+```
+
+**Summary:**
+- **Read 16MB**: ~97.94 MB/s (mean)
+- **Read 1MB**: ~34.38 MB/s (mean)
+- **Write 16MB**: ~63.34 MB/s (mean)
+- **Write 1MB**: ~11.34 MB/s (mean)
+
+*Results from benchmark run on AWS EKS cluster (us-east-1) with 10 samples. Actual results vary based on cluster location, network conditions, and storage backend.*
 
 ## 🔒 Security
 
