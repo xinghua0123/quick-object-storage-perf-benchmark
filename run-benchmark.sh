@@ -55,7 +55,7 @@ fi
 CLUSTER_TYPE="unknown"
 if echo "$CURRENT_CONTEXT" | grep -qi "minikube"; then
     CLUSTER_TYPE="minikube"
-elif kubectl get nodes -o jsonpath='{.items[0].metadata.labels}' 2>/dev/null | grep -q "eks"; then
+elif echo "$CURRENT_CONTEXT" | grep -qi "eks" || kubectl get nodes -o jsonpath='{.items[0].metadata.labels}' 2>/dev/null | grep -q "eks"; then
     CLUSTER_TYPE="eks"
 fi
 
