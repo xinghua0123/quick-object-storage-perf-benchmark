@@ -128,7 +128,7 @@ NEEDS_TOLERATIONS=false
 if [ "$CLUSTER_TYPE" = "eks" ]; then
     # Check if any nodes have the bench_test taint (check taint, not label)
     # Look for nodes with taint key=node_group and value=bench_test
-    if kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[*].key}{"="}{.spec.taints[*].value}{"\n"}{end}' 2>/dev/null | grep -q "node_group=bench_test"; then
+    if kubectl get nodes -o jsonpath='{range .items[*]}{range .spec.taints[*]}{.key}{"="}{.value}{"\n"}{end}{end}' 2>/dev/null | grep -q "node_group=bench_test"; then
         NEEDS_TOLERATIONS=true
         echo "ℹ️  EKS detected: Adding tolerations for bench_test node group"
     else
