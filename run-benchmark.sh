@@ -185,19 +185,45 @@ else
 fi
 
 # Substitute variables in YAML template
-sed -e "s|{{POD_NAME}}|$POD_NAME|g" \
-    -e "s|{{NAMESPACE}}|$NAMESPACE|g" \
-    -e "s|{{SECRET_NAME}}|$SECRET_NAME|g" \
-    -e "s|{{S3_ENDPOINT}}|$S3_ENDPOINT|g" \
-    -e "s|{{S3_BUCKET}}|$S3_BUCKET|g" \
-    -e "s|{{S3_REGION}}|$S3_REGION|g" \
-    -e "s|{{TOLERATIONS}}|$TOLERATIONS_YAML|g" \
-    "$YAML_TEMPLATE" > /tmp/opendal-bench-dynamic.yaml
-
-# Remove empty tolerations line if no tolerations were added
-if [ -z "$TOLERATIONS_YAML" ]; then
-    sed -i '' '/^  {{TOLERATIONS}}$/d' /tmp/opendal-bench-dynamic.yaml 2>/dev/null || \
-    sed -i '/^  {{TOLERATIONS}}$/d' /tmp/opendal-bench-dynamic.yaml
+# Handle tolerations separately since it may contain newlines
+if [ -n "$TOLERATIONS_YAML" ]; then
+    # Use perl for multi-line replacement, or awk as fallback
+    if command -v perl &> /dev/null; then
+        perl -pe "s|{{TOLERATIONS}}|$TOLERATIONS_YAML|g" "$YAML_TEMPLATE" | \
+        sed -e "s|{{POD_NAME}}|$POD_NAME|g" \
+            -e "s|{{NAMESPACE}}|$NAMESPACE|g" \
+            -e "s|{{SECRET_NAME}}|$SECRET_NAME|g" \
+            -e "s|{{S3_ENDPOINT}}|$S3_ENDPOINT|g" \
+            -e "s|{{S3_BUCKET}}|$S3_BUCKET|g" \
+            -e "s|{{S3_REGION}}|$S3_REGION|g" > /tmp/opendal-bench-dynamic.yaml
+    else
+        # Fallback: use awk for multi-line replacement
+        awk -v pod_name="$POD_NAME" \
+            -v namespace="$NAMESPACE" \
+            -v secret_name="$SECRET_NAME" \
+            -v s3_endpoint="$S3_ENDPOINT" \
+            -v s3_bucket="$S3_BUCKET" \
+            -v s3_region="$S3_REGION" \
+            -v tolerations="$TOLERATIONS_YAML" \
+            '{gsub(/{{POD_NAME}}/, pod_name); \
+              gsub(/{{NAMESPACE}}/, namespace); \
+              gsub(/{{SECRET_NAME}}/, secret_name); \
+              gsub(/{{S3_ENDPOINT}}/, s3_endpoint); \
+              gsub(/{{S3_BUCKET}}/, s3_bucket); \
+              gsub(/{{S3_REGION}}/, s3_region); \
+              gsub(/{{TOLERATIONS}}/, tolerations); \
+              print}' "$YAML_TEMPLATE" > /tmp/opendal-bench-dynamic.yaml
+    fi
+else
+    # No tolerations - use simple sed and remove the placeholder line
+    sed -e "s|{{POD_NAME}}|$POD_NAME|g" \
+        -e "s|{{NAMESPACE}}|$NAMESPACE|g" \
+        -e "s|{{SECRET_NAME}}|$SECRET_NAME|g" \
+        -e "s|{{S3_ENDPOINT}}|$S3_ENDPOINT|g" \
+        -e "s|{{S3_BUCKET}}|$S3_BUCKET|g" \
+        -e "s|{{S3_REGION}}|$S3_REGION|g" \
+        -e '/^  {{TOLERATIONS}}$/d' \
+        "$YAML_TEMPLATE" > /tmp/opendal-bench-dynamic.yaml
 fi
 
 echo "✅ Manifest generated from template: $YAML_TEMPLATE"
